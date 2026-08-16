@@ -536,10 +536,155 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=partner_id, text="⚠️ طرف مقابل چت رو ترک کرد.", reply_markup=MAIN_MENU)
 
         if text == "⏭ نفر بعدی":
-            await message.reply_text("🔁 برای پیدا کردن نفر بعدی، یکی از گزینه‌های چت رو بزن.", reply_markup=MAIN_MENU)
-        else:
-            await message.reply_text("چت پایان یافت.", reply_markup=MAIN_MENU)
-        return
 
     if text == "🚩 گزارش کاربر":
-        if state != "chatting" or not user[
+        if state != "chatting" or not user["partner_id"]:
+            await message.reply_text("شما الان توی چتی نیستید.", reply_markup=MAIN_MENU)
+            return
+        partner_id = user["partner_id"]
+        db.execute("INSERT INTO blocked_pairs (reporter_id, reported_id) VALUES (?, ?)", (tg_id, partner_id))
+        db.commit()
+        update_user(tg_id, state="idle", partner_id=None)
+        update_user(partner_id, state="idle", partner_id=None)
+        await context.bot.send_message(chat_id=partner_id, text="⚠️ طرف مقابل چت رو ترک کرد.", reply_markup=MAIN_MENU)
+        await message.reply_text("🚩 کاربر گزارش شد. دیگه هیچ‌وقت به هم وصل نمی‌شید.", reply_markup=MAIN_MENU)
+        return
+
+    # ---------------- رله پیام‌های چت فعال ----------------
+    if state == "chatting" and user["partner_id"]:
+        await context.bot.copy_message(chat_id=user["partner_id"], from_chat_id=chat_id, message_id=message.message_id)
+        return
+
+    # ---------------- پیش‌فرض ----------------
+    await message.reply_text("از منوی زیر یکی رو انتخاب کن 👇", reply_markup=MAIN_MENU)
+
+
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    data = query.data or ""
+    chat_id = query.message.chat_id
+    tg_id = query.from_user.id
+
+    if data.startswith("reveal_"):
+        row_id = int(data[7:])
+        cur = db.execute("SELECT * FROM anon_messages WHERE id = ?", (row_id,))
+        row = cur.fetchone()
+
+        if not row:
+            await query.answer("پیام یافت نشد.", show_alert=True)
+            return
+        cols = [d[0] for d in cur.description]
+        msg_row = dict(zip(cols, row))
+
+        if msg_row["to_tg_id"] != tg_id:
+            await query.answer("این پیام برای شما نیست.", show_alert=True)
+            return
+
+        await context.bot.copy_message(
+            chat_id=chat_id,
+            from_chat_id=msg_row["from_chat_id"],
+            message_id=msg_row["from_message_id"],
+        )
+
+        if not msg_row["revealed"]:
+            db.execute("UPDATE anon_messages SET revealed = 1 WHERE id = ?", (row_id,))
+            db.commit()
+
+        await query.answer()
+        return
+
+    if data.startswith("viewprofile_"):
+        target_id = int(data[len("viewprofile_"):])
+        viewer = get_user(tg_id)
+        if not viewer or viewer.get("partner_id") != target_id:
+            await query.answer("این پروفایل دیگه در دسترس نیست.", show_alert=True)
+            return
+        target = get_user(target_id)
+        if not target:
+            await query.answer("کاربر پیدا نشد.", show_alert=True)
+            return
+        caption = format_profile(target)
+        if target.get("photo_file_id"):
+            await context.bot.send_photo(chat_id=chat_id, photo=target["photo_file_id"], caption=caption)
+        else:
+            await context.bot.send_message(chat_id=chat_id, text=caption)
+        await query.answer()
+        return
+
+    await query.answer()
+
+
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """آمار ربات - فقط برای ادمین"""
+    tg_id = update.effective_user.id
+    if tg_id != ADMIN_ID:
+        return
+
+    total = db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    with_profile = db.execute("SELECT COUNT(*) FROM users WHERE gender IS NOT NULL").fetchone()[0]
+    chatting = db.execute("SELECT COUNT(*) FROM users WHERE state = 'chatting'").fetchone()[0]
+    waiting = db.execute("SELECT COUNT(*) FROM users WHERE state = 'waiting'").fetchone()[0]
+    males = db.execute("SELECT COUNT(*) FROM users WHERE gender = 'male'").fetchone()[0]
+    females = db.execute("SELECT COUNT(*) FROM users WHERE gender = 'female'").fetchone()[0]
+    referred = db.execute("SELECT COUNT(*) FROM users WHERE referred_by IS NOT NULL").fetchone()[0]
+
+    await update.message.reply_text(
+        "📊 آمار ربات:\n\n"
+        f"👥 کل کاربران: {total}\n"
+        f"✅ پروفایل تکمیل‌شده: {with_profile}\n"
+        f"💬 الان در حال چت: {chatting // 2}\n"
+        f"⏳ منتظر جفت: {waiting}\n\n"
+        f"👦 پسر: {males}\n"
+        f"👧 دختر: {females}\n\n"
+        f"🎁 کاربران دعوت‌شده: {referred}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# ساخت اپلیکیشن تلگرام
+# ---------------------------------------------------------------------------
+
+telegram_app = ApplicationBuilder().token(TOKEN).build()
+telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(CommandHandler("stats", stats))
+telegram_app.add_handler(CallbackQueryHandler(handle_callback))
+telegram_app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
+
+
+def run_async(coro):
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+run_async(telegram_app.initialize())
+
+# ---------------------------------------------------------------------------
+# سرور Flask
+# ---------------------------------------------------------------------------
+
+app = Flask(__name__)
+
+
+@app.route(f"/webhook/{TOKEN}", methods=["POST"])
+def webhook():
+    update = Update.de_json(request.get_json(force=True), telegram_app.bot)
+    run_async(telegram_app.process_update(update))
+    return "OK"
+
+
+@app.route("/set_webhook")
+def set_webhook_route():
+    base_url = request.args.get("url")
+    if not base_url:
+        return "پارامتر url رو توی آدرس اضافه کنید، مثلاً ?url=https://username.pythonanywhere.com"
+    result = run_async(telegram_app.bot.set_webhook(f"{base_url.rstrip('/')}/webhook/{TOKEN}"))
+    return f"وبهوک تنظیم شد: {result}"
+
+
+@app.route("/")
+def index():
+    return "ربات چت ناشناس فعاله ✅"
