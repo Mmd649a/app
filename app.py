@@ -34,8 +34,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-TOKEN = os.environ.get("BOT_TOKEN", "PUT_YOUR_TOKEN_HERE")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "123456789"))
+TOKEN = os.environ.get("BOT_TOKEN", "8746325728:AAGHxLRblmpi8Zpz7jRGsxguqEQZMmTlIzc")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "5021667769"))
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "anon_bot.db")
 
